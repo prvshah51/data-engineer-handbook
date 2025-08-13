@@ -1,0 +1,345 @@
+-- -- select * from player_seasons;
+--     select distinct current_season from players order by 1 desc;
+--
+-- CREATE TYPE season_stats AS (
+--                         season INTEGER,
+--                         gp INTEGER,
+--                         pts REAL,
+--                         reb REAL,
+--                         ast REAL
+--                             )
+--
+-- drop table players
+-- --
+-- -- CREATE TYPE scoring_class as ENUM('star', 'good', 'average', 'bad');
+-- --
+-- -- CREATE TABLE players(
+-- --     player_name TEXT,
+-- --     height TEXT,
+-- --     college TEXT,
+-- --     country TEXT,
+-- --     draft_year TEXT,
+-- --     draft_round TEXT,
+-- --     draft_number TEXT,
+-- --     season_stats season_stats[],
+-- --     scoring_class scoring_class,
+-- --     years_since_last_season INTEGER,
+-- --     current_season INTEGER,
+-- --     PRIMARY KEY (player_name, current_season)
+-- -- );
+--
+--
+-- -- with unnested as (select player_name,
+-- --                        unnest(season_stats)::season_stats as season_stats
+-- --                 from players
+-- --                 where current_season = 2001
+-- --                   )
+-- -- select player_name, (season_stats::season_stats).*
+-- -- from unnested;
+--
+-- INSERT  INTO players
+-- with yesterday AS(
+--     select * from players
+--              where current_season = 1999
+-- ),
+--     today as (
+--         select * from player_seasons
+--                  where season = 2000
+--     )
+--
+-- select
+--     COALESCE(t.player_name, y.player_name) As player_name,
+--     COALESCE(t.height, y.height) As height,
+--     COALESCE(t.college, y.college) As college,
+--     COALESCE(t.country, y.country) As country,
+--     COALESCE(t.draft_year, y.draft_year) As draft_year,
+--     COALESCE(t.draft_round, y.draft_round) As draft_round,
+--     COALESCE(t.draft_number, y.draft_number) As draft_number,
+--     case when y.season_stats is null
+--         then ARRAY[ROW(
+--             t.season,
+--             t.gp,
+--             t.pts,
+--             t.reb,
+--             t.ast
+--             )::season_stats]
+--     WHEN t.season IS NOT NULL THEN y.season_stats || ARRAY[ROW(
+--             t.season,
+--             t.gp,
+--             t.pts,
+--             t.reb,
+--             t.ast
+--             )::season_stats]
+--     ELSE y.season_stats
+--     END as SEASON_STATS,
+--
+--     case when t.season is not null
+--         then
+--         case when t.pts > 20 then 'star'
+--             when t.pts > 15 then 'good'
+--             when t.pts > 10 then 'average'
+--             else 'bad'
+--         END:: scoring_class
+--         else y.scoring_class
+--             end as scoring_class,
+--     CASE when t.season is not null then 0
+--         else coalesce(y.years_since_last_season,0) + 1
+--             end as years_since_last_season,
+--     coalesce(t.season, y.current_season + 1) as current_season
+-- from today t full outer join  yesterday y
+-- on t.player_name = y.player_name;
+--
+--
+-- select player_name,
+--        (season_stats[cardinality(season_stats)]::season_stats).pts /
+--        (case when (season_stats[1]::season_stats).pts = 0 then 1
+--             else ((season_stats[1]::season_stats).pts)
+--             end)
+--           as last_season_stats
+--
+-- from players where current_season =  '2001' and scoring_class = 'star' order by  2 desc;
+
+-- Homework 1
+
+select * from actor_films limit 11;
+
+-- 1:1
+CREATE TYPE films AS (
+                        film TEXT,
+                        votes INTEGER,
+                        rating REAL,
+                        filmid TEXT
+                            );
+--  drop type films;
+-- 1:2
+CREATE TYPE quality_class as ENUM('star', 'good', 'average', 'bad');
+
+CREATE TABLE actors(
+    actorid TEXT,
+    actor TEXT,
+    films films[],
+    quality_class quality_class,
+    is_active bool,
+    current_year INTEGER,
+    PRIMARY KEY (actorid)
+);
+
+select * from actors;
+
+drop table actors;
+truncate table actors;
+
+-- 2:
+WITH
+    today_start AS (
+        SELECT actorid, actor,
+               ROW(film, votes, rating, filmid)::films AS films,
+               rating,
+               year
+        FROM actor_films
+        WHERE year = 1973
+    ),
+    today AS (
+        SELECT actorid, actor,
+               ARRAY_AGG(films) AS films,
+               AVG(rating) AS rating,
+               year
+        FROM today_start
+        GROUP BY actorid, actor, year
+    ),
+    yesterday AS (
+        SELECT * FROM actors WHERE current_year = 1972
+    )
+INSERT INTO actors (actorid, actor, films, quality_class, is_active, current_year)
+SELECT
+    COALESCE(t.actorid, y.actorid) AS actorid,
+    COALESCE(t.actor, y.actor) AS actor,
+    CASE
+        WHEN y.films IS NULL THEN t.films
+        WHEN t.year IS NOT NULL THEN y.films || t.films
+        ELSE y.films
+    END AS films,
+    CASE
+        WHEN t.rating IS NOT NULL THEN
+            (CASE
+                WHEN t.rating > 8 THEN 'star'
+                WHEN t.rating > 7 THEN 'good'
+                WHEN t.rating > 6 THEN 'average'
+                ELSE 'bad'
+            END)::quality_class
+        ELSE y.quality_class
+    END AS quality_class,
+    CASE
+        WHEN t.year IS NOT NULL THEN TRUE
+        ELSE FALSE
+    END AS is_active,
+    COALESCE(t.year, y.current_year + 1) AS current_year
+FROM today t
+FULL OUTER JOIN yesterday y ON t.actorid = y.actorid
+ON CONFLICT (actorid) DO UPDATE SET
+    films = CASE
+        WHEN EXCLUDED.is_active THEN actors.films || EXCLUDED.films
+        ELSE actors.films
+    END,
+    quality_class = EXCLUDED.quality_class,
+    is_active = EXCLUDED.is_active,
+    current_year = EXCLUDED.current_year,
+    actor = EXCLUDED.actor;
+
+-- 3:
+
+create table actors_history_scd(
+    actorid TEXT NOT NULL ,
+    actor TEXT NOT NULL ,
+    quality_class quality_class NOT NULL,
+    is_active BOOL NOT NULL ,
+    start_year INTEGER NOT NULL ,
+    end_year INTEGER,
+    PRIMARY KEY (actorid,start_year)
+);
+truncate table actors_history_scd;
+drop table actors_history_scd;
+select * from actors_history_scd;
+
+-- 4:
+WITH first AS (
+    SELECT
+        actor,
+        actorid,
+        year,
+        AVG(rating) AS avg_rating
+    FROM actor_films
+    GROUP BY actorid, actor, year
+),
+classified AS (
+    SELECT *,
+        CASE
+            WHEN avg_rating > 8 THEN 'star'
+            WHEN avg_rating > 7 THEN 'good'
+            WHEN avg_rating > 6 THEN 'average'
+            ELSE 'bad'
+        END AS quality_class
+    FROM first
+),
+second AS (
+    SELECT actor, actorid, generate_series(MIN(year), MAX(year)) AS year
+    FROM first
+    GROUP BY actor, actorid
+)
+SELECT
+    s.actor,
+    s.actorid,
+    s.year,
+    COALESCE(c.quality_class,
+        (
+            SELECT qc.quality_class
+            FROM classified qc
+            WHERE qc.actorid = s.actorid AND qc.year < s.year
+            ORDER BY qc.year DESC
+            LIMIT 1
+        )
+    ) AS quality_class,
+    c.quality_class IS NOT NULL AS is_active
+FROM second s
+LEFT JOIN classified c ON s.actorid = c.actorid AND s.year = c.year
+ORDER BY s.actorid, s.year;
+
+
+-- 5:
+CREATE TABLE actors_history_scd (
+    actorid TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    quality_class quality_class NOT NULL,
+    is_active BOOLEAN NOT NULL,
+    current_year INTEGER NOT NULL
+);
+
+drop table actors_history_scd;
+select * from actors_history_scd order by actorid;
+
+-- Incremental query for actors_history_scd (Task 5)
+-- Change the year value (1970) in the new_year_data CTE for each new iteration
+
+INSERT INTO actors_history_scd (actorid, actor, quality_class, is_active, current_year)
+WITH first AS (
+    SELECT actor, actorid, year,
+           AVG(rating) AS avg_rating
+    FROM actor_films
+    GROUP BY actorid, actor, year
+),
+classified AS (
+    SELECT *,
+        CASE
+            WHEN avg_rating > 8 THEN 'star'
+            WHEN avg_rating > 7 THEN 'good'
+            WHEN avg_rating > 6 THEN 'average'
+            ELSE 'bad'
+        END::quality_class AS quality_class
+    FROM first
+),
+year_range AS (
+    SELECT actor, actorid, generate_series(MIN(year), MAX(year)) AS current_year
+    FROM first
+    GROUP BY actor, actorid
+),
+yearly_states AS (
+    SELECT
+        y.actor,
+        y.actorid,
+        y.current_year,
+        COALESCE(c.quality_class,
+            (
+                SELECT quality_class
+                FROM classified qc
+                WHERE qc.actorid = y.actorid AND qc.year < y.current_year
+                ORDER BY qc.year DESC
+                LIMIT 1
+            )
+        ) AS quality_class,
+        c.quality_class IS NOT NULL AS is_active
+    FROM year_range y
+    LEFT JOIN classified c ON y.actorid = c.actorid AND y.current_year = c.year
+)
+SELECT actorid, actor, quality_class, is_active, current_year
+FROM yearly_states
+ORDER BY actorid, current_year;
+
+
+
+WITH new_year_data AS (
+    SELECT actorid, actor,
+           CASE
+               WHEN AVG(rating) > 8 THEN 'star'
+               WHEN AVG(rating) > 7 THEN 'good'
+               WHEN AVG(rating) > 6 THEN 'average'
+               ELSE 'bad'
+           END::quality_class AS quality_class,
+           TRUE AS is_active,  -- Active since there are films this year
+           1972 AS current_year  -- Change this year value for each new iteration
+    FROM actor_films
+    WHERE year = 1972  -- Change this year value for each new iteration
+    GROUP BY actorid, actor
+),
+latest_scd AS (
+    SELECT actor, actorid, quality_class, is_active, current_year
+    FROM actors_history_scd
+    WHERE current_year = (SELECT MAX(current_year) FROM actors_history_scd h2 WHERE h2.actorid = actors_history_scd.actorid)
+),
+changes AS (
+    SELECT n.actorid, n.actor, n.quality_class, n.is_active, n.current_year
+    FROM new_year_data n
+    LEFT JOIN latest_scd l ON n.actorid = l.actorid
+    WHERE l.actorid IS NULL  -- New actor
+       OR l.quality_class <> n.quality_class
+       OR l.is_active <> n.is_active
+    UNION
+    -- Include inactive actors from previous SCD state who have no films this year
+    SELECT l.actorid, l.actor, l.quality_class, FALSE AS is_active, 1972 AS current_year  -- Change this year value
+    FROM latest_scd l
+    LEFT JOIN new_year_data n ON l.actorid = n.actorid
+    WHERE n.actorid IS NULL
+      AND l.is_active = TRUE  -- Was active previously, now inactive
+)
+INSERT INTO actors_history_scd (actorid, actor, quality_class, is_active, current_year)
+SELECT actorid, actor, quality_class, is_active, current_year
+FROM changes;

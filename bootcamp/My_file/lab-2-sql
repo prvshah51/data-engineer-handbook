@@ -1,0 +1,200 @@
+--Homework week 2
+
+
+-- A query to deduplicate `game_details` from Day 1 so there's no duplicates
+with deduped as (
+    select
+        g.game_date_est,
+        g.season,
+        g.home_team_id,
+        g.visitor_team_id,
+        gd.*,
+            row_number() over (partition by gd.game_id,team_id,player_id order by g.game_date_est)
+                as row_num
+    from game_details gd join games g
+        on gd.game_id = g.game_id
+)
+-- Taking only the 1st occurence of each row.
+select * from deduped where row_num = 1;
+
+--task 2
+CREATE TABLE user_devices_cumulated (
+    user_id TEXT NOT NULL,
+    device_activity_datelist JSONB NOT NULL,
+    PRIMARY KEY (user_id)
+);
+
+--task 3
+INSERT INTO user_devices_cumulated (user_id, device_activity_datelist)
+WITH event_dates AS (
+    SELECT
+        e.user_id::TEXT,
+        d.browser_type,
+        -- aggregating all dates for each user and browser_type
+        ARRAY_AGG(DISTINCT DATE(e.event_time) ORDER BY DATE(e.event_time)) AS active_dates
+    FROM events e
+    JOIN devices d ON e.device_id = d.device_id
+    -- not taking any null values
+    WHERE
+        e.user_id is not null and
+        e.event_time IS NOT NULL
+      AND d.browser_type IS NOT NULL
+
+    GROUP BY e.user_id, d.browser_type
+),
+json_map AS (
+    SELECT
+        user_id,
+        -- taking jsonb object each browser type and active dates
+        JSONB_OBJECT_AGG(browser_type, active_dates) AS device_activity_datelist
+
+    FROM event_dates
+    GROUP BY user_id
+)
+SELECT user_id, device_activity_datelist
+FROM json_map;
+
+--task 4
+WITH
+series AS (
+SELECT generate_series(DATE('2023-01-01'), DATE('2023-01-31'), INTERVAL '1 day') AS series_date
+),
+active_dates_med AS (
+SELECT u.user_id, b.browser_type, CAST(d.date_text AS DATE) AS active_date
+FROM user_devices_cumulated u
+CROSS JOIN LATERAL jsonb_object_keys(u.device_activity_datelist) AS b(browser_type)
+CROSS JOIN LATERAL jsonb_array_elements_text(u.device_activity_datelist -> b.browser_type) AS d(date_text)
+),
+active_dates AS (
+SELECT
+user_id,
+browser_type,
+ARRAY_AGG(DISTINCT active_date ORDER BY active_date) AS active_dates
+FROM active_dates_med
+GROUP BY user_id, browser_type
+),
+placeholder_int AS (
+SELECT
+ad.user_id,
+ad.browser_type,
+s.series_date,
+CASE
+WHEN ad.active_dates @> ARRAY[DATE(s.series_date)] THEN CAST(POWER(2, 31 - (DATE(s.series_date) - DATE('2023-01-01'))) AS BIGINT)
+ELSE 0
+END AS placeholder_int_value
+FROM active_dates ad
+CROSS JOIN series s
+),
+bitmasks AS (
+SELECT
+user_id,
+browser_type,
+--CAST(SUM(placeholder_int_value) AS BIGINT) AS datelist_int_raw,
+CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32)) AS datelist_int,
+BIT_COUNT(CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32))) > 0 AS dim_is_monthly_active,
+BIT_COUNT(CAST('11111110000000000000000000000000' AS BIT(32)) & CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32))) > 0 AS dim_is_weekly_active,
+BIT_COUNT(CAST('10000000000000000000000000000000' AS BIT(32)) & CAST(CAST(SUM(placeholder_int_value) AS BIGINT) AS BIT(32))) > 0 AS dim_is_daily_active
+FROM placeholder_int
+GROUP BY user_id, browser_type
+)
+SELECT * FROM bitmasks;
+
+
+--task 5
+CREATE TABLE hosts_cumulated (
+    host TEXT NOT NULL,
+    host_activity_datelist DATE[] NOT NULL,
+    PRIMARY KEY (host)
+);
+
+-- task 6:
+
+INSERT INTO hosts_cumulated
+with yesterday as(
+    select * from hosts_cumulated
+),
+    today as(
+        select host,
+               ARRAY_AGG(DISTINCT DATE(event_time)) AS date_active
+        from events where event_time is not null and
+                        DATE(event_time) = DATE('2023-01-02') group by host
+
+    )
+select
+    coalesce(t.host,y.host) as host,
+    CASE
+    WHEN y.host_activity_datelist IS NULL AND t.date_active IS NOT NULL THEN t.date_active
+    WHEN y.host_activity_datelist IS NOT NULL AND t.date_active IS NOT NULL THEN y.host_activity_datelist || t.date_active
+    ELSE y.host_activity_datelist
+END as host_activity_datelist
+    from today t full outer join yesterday y
+        on t.host = y.host
+on conflict(host) do update SET host_activity_datelist =
+    (
+    SELECT ARRAY(
+           SELECT DISTINCT unnest_val
+        FROM unnest(hosts_cumulated.host_activity_datelist || EXCLUDED.host_activity_datelist) AS unnest_val
+        ORDER BY unnest_val
+        )
+    );
+
+
+--task 7:
+CREATE TABLE host_activity_reduced (
+    month TEXT NOT NULL,
+    host TEXT NOT NULL,
+    hit_array INT[],
+    unique_visitors_array INT[],
+    CONSTRAINT host_activity_unique UNIQUE (month, host)
+);
+
+--task 8:
+-- base takes data for the required period
+WITH base AS (
+    SELECT
+        TO_CHAR(event_time::timestamp, 'YYYY-MM') AS month,
+        host,
+        DATE(event_time) AS day,
+        COUNT(1) AS hits,
+        COUNT(DISTINCT user_id) AS unique_visitors
+    FROM events
+    WHERE event_time >= '2023-01-01' AND event_time < '2023-02-01'
+    GROUP BY 1, 2, 3
+),
+-- final is aggregating data accoring to month and host
+final AS (
+    SELECT
+        month,
+        host,
+        ARRAY_AGG(hits ORDER BY day) AS hit_array,
+        ARRAY_AGG(unique_visitors ORDER BY day) AS unique_visitors_array
+    FROM base
+    GROUP BY month, host
+)
+
+INSERT INTO host_activity_reduced (month, host, hit_array, unique_visitors_array)
+SELECT * FROM final;
+
+
+-- task 9
+
+--new day data filtered
+WITH today AS (
+    SELECT
+        TO_CHAR(event_time::timestamp, 'YYYY-MM') AS month,
+        host,
+        ARRAY[COUNT(1)] AS hit_array, -- idea is to always have an array that can be used initially ot to merge with other array
+        ARRAY[COUNT(DISTINCT user_id)] AS unique_visitors_array
+    FROM events
+    WHERE DATE(event_time) = '2023-01-03'  -- change per run
+    GROUP BY 1, 2
+)
+
+INSERT INTO host_activity_reduced (month, host, hit_array, unique_visitors_array)
+-- taking new day data and using on conflict to merge it with old data
+SELECT month, host, hit_array, unique_visitors_array
+FROM today
+ON CONFLICT (month, host)
+DO UPDATE SET
+    hit_array = host_activity_reduced.hit_array || EXCLUDED.hit_array,
+    unique_visitors_array = host_activity_reduced.unique_visitors_array || EXCLUDED.unique_visitors_array;
